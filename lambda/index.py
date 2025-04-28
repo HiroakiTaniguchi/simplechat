@@ -4,22 +4,111 @@ import os
 import boto3
 import re  # 正規表現モジュールをインポート
 from botocore.exceptions import ClientError
+import urllib.request
 
+COLAB_API_URL = os.environ.get("COLAB_API_URL", "https://f790-34-90-22-7.ngrok-free.app/generate")
 
 # Lambda コンテキストからリージョンを抽出する関数
-def extract_region_from_arn(arn):
-    # ARN 形式: arn:aws:lambda:region:account-id:function:function-name
-    match = re.search('arn:aws:lambda:([^:]+):', arn)
-    if match:
-        return match.group(1)
-    return "us-east-1"  # デフォルト値
+def lambda_handler(event, context):
+    try:
+        print("Received event:", json.dumps(event))
 
-# グローバル変数としてクライアントを初期化（初期値）
-bedrock_client = None
+        # Cognito認証情報（必要に応じて）
+        user_info = None
+        if 'requestContext' in event and 'authorizer' in event['requestContext']:
+            user_info = event['requestContext']['authorizer']['claims']
+            print(f"Authenticated user: {user_info.get('email') or user_info.get('cognito:username')}")
 
-# モデルID
-MODEL_ID = os.environ.get("MODEL_ID", "us.amazon.nova-lite-v1:0")
+        # リクエストボディの取得
+        body = json.loads(event['body'])
+        message = body['message']
+        conversation_history = body.get('conversationHistory', [])
 
+        print("Processing message:", message)
+
+        # promptを作成
+        prompt = ""
+        for msg in conversation_history:
+            if msg["role"] == "user":
+                prompt += f"User: {msg['content']}\n"
+            elif msg["role"] == "assistant":
+                prompt += f"Assistant: {msg['content']}\n"
+        prompt += f"User: {message}\nAssistant:"
+
+        # 送信するJSONデータを準備
+        request_payload = {
+            "prompt": prompt,
+            "max_new_tokens": 512,
+            "do_sample": True,
+            "temperature": 0.7,
+            "top_p": 0.9
+        }
+        request_data = json.dumps(request_payload).encode('utf-8')
+
+        print(f"Sending request to Colab API: {COLAB_API_URL}")
+
+        # urllibでリクエストを送信
+        req = urllib.request.Request(
+            COLAB_API_URL,
+            data=request_data,
+            headers={'accept': 'application/json','Content-Type': 'application/json'},
+            method='POST'
+        )
+        with urllib.request.urlopen(req) as response:
+            response_body = response.read().decode('utf-8')
+            print("Colab API response:", response_body)
+
+        response_json = json.loads(response_body)
+
+        # Colabから返るJSONのキーに合わせる（仮に "generated_text" を返す想定）
+        assistant_response = response_json.get("generated_text", "").strip()
+
+        if not assistant_response:
+            raise Exception("No generated text received from the Colab API")
+
+        # 会話履歴に追加
+        conversation_history.append({
+            "role": "user",
+            "content": message
+        })
+        conversation_history.append({
+            "role": "assistant",
+            "content": assistant_response
+        })
+
+        # 成功レスポンス
+        return {
+            "statusCode": 200,
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token",
+                "Access-Control-Allow-Methods": "OPTIONS,POST"
+            },
+            "body": json.dumps({
+                "success": True,
+                "response": assistant_response,
+                "conversationHistory": conversation_history
+            })
+        }
+
+    except Exception as error:
+        print("Error:", str(error))
+        return {
+            "statusCode": 500,
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token",
+                "Access-Control-Allow-Methods": "OPTIONS,POST"
+            },
+            "body": json.dumps({
+                "success": False,
+                "error": str(error)
+            })
+        }
+
+"""
 def lambda_handler(event, context):
     try:
         # コンテキストから実行リージョンを取得し、クライアントを初期化
@@ -138,3 +227,4 @@ def lambda_handler(event, context):
                 "error": str(error)
             })
         }
+"""
